@@ -1,8 +1,8 @@
 # 🤖 Agentic AI Architect (v0.0.1)
 
-A closed-loop AI system that takes a raw idea, interviews the user until it fully understands it, iteratively designs and tests an agent prompt, evaluates the output with a structured rating schema, and ships a standalone, runnable Python agent.
+A closed-loop AI system that takes a raw idea, interviews the user until it fully understands it, iteratively designs and prompt-tests an agent, generates standalone Python code, evaluates it via real subprocess execution, and ships an approved, runnable agent file.
 
-> **Status:** Alpha. Core loop is complete and functional. Not production-hardened.
+> **Status:** Developer alpha. Requires manual setup. Not consumer-ready.
 
 ---
 
@@ -10,9 +10,9 @@ A closed-loop AI system that takes a raw idea, interviews the user until it full
 
 Most AI tools generate code in one pass. This system thinks in loops:
 
-1. **It asks before it builds.** A clarification loop runs until intent is fully captured — no assumptions.
-2. **It tests before it trusts.** Every generated prompt is executed in a sandboxed subprocess before evaluation.
-3. **It refines until approved.** A structured rating schema drives iteration. A human gate controls the exit.
+1. **It asks before it builds.** A clarification loop runs until intent is fully captured.
+2. **It tests before it trusts.** Generated prompts are LLM-tested in Phase 3, then the final code is executed in a real subprocess in Phase 5.
+3. **It refines until approved.** A structured rating schema drives iteration. A human gate controls every exit point.
 
 ---
 
@@ -23,21 +23,33 @@ User Raw Idea
      ↓
 Clarification Loop  →  Structured Idea Payload
                                ↓
-              ┌────────────────────────────────────┐
-              │  Design Loop                        │
-              │  Generate Prompt + Args             │
-              │       ↓                             │
-              │  Sandbox (subprocess + venv)        │
-              │       ↓                             │
-              │  LLM Rating Schema                  │
-              │       ↓                             │
-              │  Remake? ──yes──→ refine + retry    │
-              │       ↓ no                          │
-              │  Human Approval Gate                │
-              │       ↓ approved                    │
-              └────────────────────────────────────┘
+              ┌────────────────────────────────────────┐
+              │  Design Loop                            │
+              │  Generate: Name, Scope, Prompt, Args   │
+              │       ↓                                 │
+              │  Prompt Test (LLM invoke, not subprocess│
+              │       ↓                                 │
+              │  Finish? ──no──→ refine + retry         │
+              │       ↓ yes                             │
+              │  Human Approval Gate                    │
+              │       ↓ approved                        │
+              └────────────────────────────────────────┘
                                ↓
-              Code Generation  →  Standalone .py Agent
+              Code Generation Loop
+                               ↓
+              ┌────────────────────────────────────────┐
+              │  Evaluation Loop                        │
+              │  TestAgent: real subprocess execution   │
+              │       ↓                                 │
+              │  LLM Rating Schema                      │
+              │       ↓                                 │
+              │  Remake? ──yes──→ back to CodeGen       │
+              │       ↓ no                              │
+              │  Human Approval Gate                    │
+              │       ↓ approved                        │
+              └────────────────────────────────────────┘
+                               ↓
+              SaveAgent → {Agent_Name}.py
 ```
 
 ---
@@ -46,16 +58,16 @@ Clarification Loop  →  Structured Idea Payload
 
 ### Phase 1 — Initialization
 **`Agentic.__init__()`**
-- Loads LLM client (`Qwen3.6-35B` via vLLM at `localhost:8080/v1`)
-- Configures inference parameters: no thinking tokens, structured output mode
-- Accepts raw, unstructured user input
+- Loads LLM via LangChain `init_chat_model` using an OpenAI-compatible endpoint (`localhost:8080/v1`).
+- Configured with `enable_thinking: False` for structured, non-verbose output.
+- Accepts raw unstructured user input, passes it to the clarification loop.
 
 ---
 
-### Phase 2 — Interactive Clarification Loop
+### Phase 2 — Clarification Loop
 **`define_user_request()`**
 
-Runs an interview loop against the raw input. Does not proceed until intent is fully understood.
+Runs an interview loop. Does not proceed until the LLM signals it has fully understood the request.
 
 LLM response schema per turn:
 ```json
@@ -67,16 +79,16 @@ LLM response schema per turn:
 }
 ```
 
-- `done_understanding: false` → prints question, appends user reply to `chat_history`, retries
-- `done_understanding: true` → extracts structured `idea` payload, exits loop
-- Full `chat_history` is passed on every turn — no context loss across iterations
+- `done_understanding: false` → prints question, appends Q&A pair to `chat_history` string, retries.
+- `done_understanding: true` → extracts `idea` payload, calls `Agentic_Ai()`.
+- Full `chat_history` is appended as a string on every turn — no context is dropped between iterations.
 
 ---
 
-### Phase 3 — Iterative Design & Sandbox Testing
+### Phase 3 — Design Loop
 **`Agentic_Ai()` + `Sandbox()`**
 
-Takes the structured `idea` and enters a refinement loop.
+Takes the structured `idea` and enters a prompt refinement loop.
 
 Each iteration generates:
 ```json
@@ -84,53 +96,63 @@ Each iteration generates:
   "Agent_Name": str,
   "Agent_Scope": str,
   "Agent_Prompt": str,
-  "Agent_Args": obj
+  "Agent_Args": obj,
+  "Finish": bool
 }
 ```
 
-`Sandbox()` execution:
-- Passes `Agent_Prompt` + `Agent_Args` to the LLM
-- Captures raw output as a test result
-- Appends to `agent_history` for state tracking across iterations
+**Important:** `Finish` is always `false` on iteration 0 — enforced via the counter value injected into the prompt. This prevents premature exit before any result exists.
 
-Loop control:
-- `Finish: false` → increments `tries_count`, updates prompt with history, retries
-- `Finish: true` → pauses for human approval before exiting
+`Sandbox()` at this stage is a **direct LLM invoke** — the generated prompt is tested against the LLM with the provided args. This is prompt validation, not code execution. Subprocess sandboxing happens later in Phase 5.
 
-`agent_history` acts as a lightweight state machine — every iteration is informed by all previous attempts.
+Loop tracking:
+- Each attempt appends `{prompt_used, result}` to `agent_history`.
+- `agent_history` is passed on every subsequent iteration — the LLM has full visibility into what was tried and what failed.
+- `tries_count` increments each iteration and is injected into the prompt.
+
+Exit:
+- `Finish: true` + human approves → proceeds to `BuildAgent()`.
+- `Finish: true` + human rejects → captures notes, adds to `user_notes`, continues loop.
 
 ---
 
-### Phase 4 — Standalone Code Generation
+### Phase 4 — Code Generation Loop
 **`BuildAgent()`**
 
-Switches from design mode to code generation mode.
+Switches from prompt design to Python code generation.
 
 Sends to LLM:
-- Reference template (from `main.py` itself)
-- Final `agent_name`, `agent_scope`, `agent_prompt`, `example_result`
+- A method-level template showing expected code structure
+- Full `main.py` source injected as a reference (self-referential generation)
+- `agent_name`, `agent_scope`, `agent_prompt`, `example_result`, `user_request`
+- Any notes and results from failed previous builds
 
 Expected output schema:
 ```json
 {
   "python_code": str,
   "response": str,
-  "input_for_test": str
+  "input_for_test": str,
+  "input_text": str
 }
 ```
 
-The reference template is injected directly — generated agents inherit the same error handling, JSON parsing, and structural patterns without hardcoding them per agent.
+Generated agents inherit the same structural patterns — error handling, JSON parsing, LLM initialization — from the injected source reference without hardcoding them per agent.
+
+Immediately passes generated code to `RateAgentResult()` for evaluation.
 
 ---
 
-### Phase 5 — Evaluation & Human Approval
+### Phase 5 — Evaluation Loop
 **`RateAgentResult()` + `TestAgent()`**
 
-`TestAgent()` runs the generated code in a real subprocess:
-- Writes to `tempfile.NamedTemporaryFile`
-- Executes via isolated venv Python path
-- Injects `PYTHONPATH` to preserve `langchain` availability
+`TestAgent()` executes the generated code in a **real subprocess**:
+- Writes code to `tempfile.NamedTemporaryFile`
+- Executes via a dedicated venv Python interpreter
+- Injects `PYTHONPATH` to make dependencies available inside the subprocess
+- Pipes `input_for_test` to stdin
 - Captures `stdout`, `stderr`, and `exit_code`
+- Deletes the temp file in a `finally` block
 
 LLM rating schema:
 ```json
@@ -144,20 +166,17 @@ LLM rating schema:
 }
 ```
 
-- `Remake: true` → loops back to `BuildAgent()` with `Notes` as refinement instructions
-- `Remake: false` → human approval gate: `Are you happy with these results? (Y/n)`
+- `Remake: true` → returns notes + agent result back to `BuildAgent()` for a new generation attempt.
+- `Remake: false` → human approval gate: `Are you good with this? (Y/n)`.
+  - Approved → `SaveAgent()`.
+  - Rejected → captures human notes, loops back to `BuildAgent()`.
 
 ---
 
-### Phase 6 — Final Output
+### Phase 6 — Output
 **`SaveAgent()`**
 
-- Writes approved code to `{Agent_Name}.py`
-- Output is a standalone, runnable Python class:
-  - LLM initialization
-  - Input handling
-  - JSON parsing with error fallbacks
-  - No framework dependency in the generated agent itself
+Writes approved code to `{Agent_Name}.py`. The output is a standalone, runnable Python class.
 
 ---
 
@@ -174,7 +193,6 @@ class SuperIdeaToAtomicTasks:
         ...
 ```
 
-Run independently:
 ```bash
 python SuperIdeaToAtomicTasks.py
 ```
@@ -187,41 +205,61 @@ python SuperIdeaToAtomicTasks.py
 |-----------|--------|---------|
 | Initialization | `Agentic.__init__()` | LLM setup, raw input intake |
 | Clarification | `define_user_request()` | Stateful interview loop, idea extraction |
-| Design Loop | `Agentic_Ai()` | Iterative prompt generation and refinement |
-| Sandboxing | `Sandbox()` / `TestAgent()` | Subprocess execution, output capture |
+| Design Loop | `Agentic_Ai()` | Iterative prompt generation and LLM-based prompt testing |
+| Prompt Test | `Sandbox()` | LLM invoke of generated prompt against test args |
+| Code Generation | `BuildAgent()` | Self-referential Python class generation |
+| Subprocess Test | `TestAgent()` | Real execution via venv subprocess, captures stdout/stderr/exit |
 | Evaluation | `RateAgentResult()` | Structured LLM rating + human approval gate |
-| Code Generation | `BuildAgent()` | Template-injected standalone agent synthesis |
-| Output | `SaveAgent()` | Atomic write to `{Agent_Name}.py` |
+| Output | `SaveAgent()` | Writes approved agent to `{Agent_Name}.py` |
 
 ---
 
 ## ⚙️ Engineering Notes
 
-- **JSON parsing:** All LLM responses are regex-stripped of markdown fences before parsing. Structured fallbacks on failure.
-- **Sandboxing:** Process-level isolation via `tempfile` + `subprocess` + venv Python path. No resource limits or timeouts yet — known limitation.
-- **State tracking:** `chat_history` and `agent_history` are passed in full on every iteration. No context is lost between turns.
-- **Self-referential generation:** `BuildAgent()` injects `main.py`'s own template as a reference, ensuring all generated agents follow consistent structure and error handling.
-- **Human-in-the-loop:** `Finish: true` is LLM-evaluated, but the loop never exits without explicit human approval.
+- **Two distinct testing stages:** Phase 3 tests prompts via LLM invoke. Phase 5 tests generated Python code via real subprocess execution. These are separate concerns.
+- **Self-referential generation:** `BuildAgent()` injects the full `main.py` source as a reference, ensuring generated agents follow consistent structure without hardcoding patterns per output.
+- **State tracking:** `chat_history` (clarification turns) and `agent_history` (design iterations) are passed in full on every call — no context is lost mid-loop.
+- **Counter guard:** `tries_count` is injected into the Phase 3 prompt to enforce `Finish: false` on iteration 0, preventing exit before any result exists.
+- **JSON parsing:** Raw `json.loads()` on LLM output. If the model wraps output in markdown fences, parsing will fail and the loop retries via the `except` block.
 
 ---
 
 ## ⚠️ Known Limitations
 
-- Subprocess sandbox has no timeout or resource cap — a runaway generated script will hang the loop
-- LLM rating is schema-structured but not rubric-calibrated — quality judgment depends on the model
-- No persistent state between sessions — each run starts from scratch
-- Single-agent output only — no multi-agent composition yet
+- **No subprocess timeout** — a runaway generated script will hang the process indefinitely.
+- **Hardcoded paths** — venv Python path and source file path are hardcoded. Requires manual edit before use on any machine other than the development system. See setup below.
+- **JSON parsing is not fault-tolerant** — no markdown fence stripping. Models that wrap output in ` ```json ``` ` will cause a parse failure on every call.
+- **No persistent state** — each run starts from scratch. No session saving or resumption.
+- **Single-agent output only** — no multi-agent composition or dependency resolution.
 
 ---
 
 ## 📦 Prerequisites
 
 - Python 3.10+
-- LangChain (LLM invocation only)
-- Local LLM endpoint at `http://localhost:8080/v1` (tested with Qwen3.6-35B via vLLM)
+- A Python venv with LangChain installed
+- Local LLM endpoint at `http://localhost:8080/v1` (tested with Qwen3.6-35B via llama.cpp/vLLM)
 
 ```bash
 pip install langchain langchain-openai
+```
+
+---
+
+## ⚙️ Setup
+
+Before running, edit these hardcoded values in `main.py`:
+
+```python
+# In Agentic.__init__() — set your model name
+model="your-model-name-here"
+
+# In TestAgent() — set your venv Python path
+venv_py = "/path/to/your/.venv/bin/python3.12"
+site_packages = "/path/to/your/.venv/lib/python3.12/site-packages"
+
+# In BuildAgent() → ReadFile() — set your main.py path
+self.ReadFile('/path/to/your/main.py')
 ```
 
 ---
@@ -233,23 +271,23 @@ python main.py
 ```
 
 1. Enter your raw idea or project description
-2. Answer clarification questions until the system signals it understands
-3. Review sandbox test output per design iteration
-4. Watch LLM rating schema evaluate and refine
-5. Approve the final result → agent saved as `{Agent_Name}.py`
+2. Answer clarification questions until `done_understanding: true`
+3. Review prompt test output per design iteration — approve or provide notes
+4. Generated Python code is executed in subprocess and rated
+5. Approve the final result → saved as `{Agent_Name}.py`
 
 ---
 
 ## 📈 Roadmap
 
+- [ ] `.env` / `config.yaml` for model name, paths, and endpoint
+- [ ] Markdown fence stripping before JSON parsing
 - [ ] Subprocess timeout and resource limits
-- [ ] Rubric-calibrated rating criteria
-- [ ] Async execution and streaming responses
-- [ ] Multi-agent composition and dependency resolution
-- [ ] CLI interface and config-driven LLM routing
+- [ ] Persistent session state
+- [ ] Multi-agent composition
 
 ---
 
 ## 🏷️ License
 
-MIT © 2026 SBM Labs
+MIT © 2026
