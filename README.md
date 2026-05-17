@@ -224,16 +224,6 @@ python SuperIdeaToAtomicTasks.py
 
 ---
 
-## ⚠️ Known Limitations
-
-- **No subprocess timeout** — a runaway generated script will hang the process indefinitely.
-- **Hardcoded paths** — venv Python path and source file path are hardcoded. Requires manual edit before use on any machine other than the development system. See setup below.
-- **JSON parsing is not fault-tolerant** — no markdown fence stripping. Models that wrap output in ` ```json ``` ` will cause a parse failure on every call.
-- **No persistent state** — each run starts from scratch. No session saving or resumption.
-- **Single-agent output only** — no multi-agent composition or dependency resolution.
-
----
-
 ## 📦 Prerequisites
 
 - Python 3.10+
